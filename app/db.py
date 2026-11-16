@@ -27,6 +27,26 @@ def get_db(db_path: str | None = None):
         conn.close()
 
 
+@contextmanager
+def locked_db(db_path: str | None = None):
+    """串行写锁：BEGIN IMMEDIATE 进库即取 SQLite 写锁。
+
+    缩天换版 / 到期扫描 / 裁决执行等写路径都必须走这里，
+    保证两名调度（缩天与扫描）串行落库，缺锁会出现
+    「缩天双成功、新旧各跑一单」的并发错位。
+    """
+    conn = connect(db_path)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS retain_policies (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,6 +93,7 @@ CREATE TABLE IF NOT EXISTS judgments (
   decided_action TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('待执行','执行中','已完成','已失败','已作废')),
   fail_reason TEXT NOT NULL DEFAULT '',
+  void_reason TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   FOREIGN KEY(scan_job_id) REFERENCES scan_jobs(id),
   FOREIGN KEY(partition_id) REFERENCES partitions(id)
@@ -98,7 +119,20 @@ CREATE TABLE IF NOT EXISTS reconcile_reports (
   destroyed_count INTEGER NOT NULL,
   pending_judgment_count INTEGER NOT NULL,
   mismatch_count INTEGER NOT NULL,
+  version_mismatch_count INTEGER NOT NULL DEFAULT 0,
   summary TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS shrink_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain_code TEXT NOT NULL,
+  from_version INTEGER NOT NULL,
+  to_version INTEGER NOT NULL,
+  from_keep_days INTEGER NOT NULL,
+  to_keep_days INTEGER NOT NULL,
+  voided_count INTEGER NOT NULL DEFAULT 0,
+  operator TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -132,9 +166,31 @@ SEED_PARTITIONS = [
 ]
 
 
+def _ensure_column(
+    conn: sqlite3.Connection, table: str, column: str, ddl: str
+) -> None:
+    """老库补列：CREATE IF NOT EXISTS 不会回填新列，需 ALTER 迁移。"""
+    cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    _ensure_column(
+        conn, "judgments", "void_reason", "void_reason TEXT NOT NULL DEFAULT ''"
+    )
+    _ensure_column(
+        conn,
+        "reconcile_reports",
+        "version_mismatch_count",
+        "version_mismatch_count INTEGER NOT NULL DEFAULT 0",
+    )
+
+
 def init_db(db_path: str | None = None) -> None:
     with get_db(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
         n = conn.execute("SELECT COUNT(*) AS c FROM retain_policies").fetchone()["c"]
         if n == 0:
             for domain_code, domain_name, keep_days, action in SEED_POLICIES:

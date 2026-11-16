@@ -1,10 +1,15 @@
 import sqlite3
 
 from app.services.partitions import get_partition
+from app.services.policies import get_active_policy
 
 
 def execute_judgment(conn: sqlite3.Connection, judgment_id: int) -> dict:
-    """执行单条裁决：归档写入 archive_uri；销毁清空在线态。整单失败则回滚本条。"""
+    """执行单条裁决：归档写入 archive_uri；销毁清空在线态。整单失败则回滚本条。
+
+    缩天不一致即拦：出库前核对裁决绑定版本与现行策略版本，不一致
+    （缩天后遗留的旧快照单）直接拦下，须作废重扫后按新版执行。
+    """
     row = conn.execute(
         "SELECT * FROM judgments WHERE id = ?", (judgment_id,)
     ).fetchone()
@@ -13,6 +18,16 @@ def execute_judgment(conn: sqlite3.Connection, judgment_id: int) -> dict:
     judgment = dict(row)
     if judgment["status"] not in ("待执行", "已失败"):
         raise ValueError(f"当前状态不可执行：{judgment['status']}")
+
+    current = get_active_policy(conn, judgment["domain_code"])
+    if not current:
+        raise ValueError(f"主题域 {judgment['domain_code']} 无现行策略，已拦下")
+    if int(current["version"]) != int(judgment["policy_version"]):
+        raise ValueError(
+            f"绑定版本 v{judgment['policy_version']}/{judgment['keep_days']}天 "
+            f"与现行版本 v{current['version']}/{current['keep_days']}天 不一致，"
+            "已拦下：请作废重扫后按新版开单执行"
+        )
 
     part = get_partition(conn, judgment["partition_id"])
     if not part:

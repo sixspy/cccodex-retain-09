@@ -6,8 +6,10 @@ from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from app.config import Config
-from app.db import get_db, init_db
+from app.db import get_db, init_db, locked_db
 from app.services import (
+    ShrinkConflict,
+    ShrinkInvalid,
     execute_judgment,
     list_judgments,
     list_partitions,
@@ -15,8 +17,10 @@ from app.services import (
     list_reports,
     list_runs,
     list_scan_jobs,
+    list_shrink_events,
     run_expire_scan,
     run_reconcile,
+    shrink_policy,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -107,7 +111,39 @@ def api_meta(request: Request):
 def api_policies(request: Request):
     require_user(request)
     with get_db() as conn:
-        return {"items": list_policies(conn, active_only=True)}
+        return {"items": list_policies(conn)}
+
+
+@app.post("/api/policies/{domain_code}/shrink")
+async def api_shrink(request: Request, domain_code: str):
+    user = require_user(request)
+    body = await request.json()
+    try:
+        keep_days = int(body.get("keep_days"))
+        base_version = int(body.get("base_version"))
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="keep_days 与 base_version 须为整数")
+    try:
+        with locked_db() as conn:
+            result = shrink_policy(
+                conn,
+                domain_code,
+                keep_days,
+                base_version,
+                operator=user,
+            )
+    except ShrinkConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ShrinkInvalid as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True, **result}
+
+
+@app.get("/api/shrink-events")
+def api_shrink_events(request: Request):
+    require_user(request)
+    with get_db() as conn:
+        return {"items": list_shrink_events(conn)}
 
 
 @app.get("/api/partitions")
@@ -131,7 +167,7 @@ async def api_create_scan(request: Request):
     as_of = str(body.get("as_of_date", "")).strip()
     if not as_of:
         raise HTTPException(status_code=400, detail="缺少 as_of_date")
-    with get_db() as conn:
+    with locked_db() as conn:
         job = run_expire_scan(conn, as_of)
     return {"ok": True, "job": job}
 
@@ -147,7 +183,7 @@ def api_judgments(request: Request, status: str | None = None):
 def api_execute(request: Request, judgment_id: int):
     require_user(request)
     try:
-        with get_db() as conn:
+        with locked_db() as conn:
             run = execute_judgment(conn, judgment_id)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -175,6 +211,6 @@ async def api_reconcile(request: Request):
     as_of = str(body.get("as_of_date", "")).strip()
     if not as_of:
         raise HTTPException(status_code=400, detail="缺少 as_of_date")
-    with get_db() as conn:
+    with locked_db() as conn:
         report = run_reconcile(conn, as_of)
     return {"ok": True, "report": report}

@@ -177,6 +177,27 @@ th { color: var(--muted); font-weight: 550; }
 .tag.warn { color: var(--warn); border-color: #5a4d2e; }
 .tag.bad { color: var(--bad); border-color: #5a3535; }
 .empty { color: var(--muted); padding: 12px 0; }
+.shrink-form {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+.shrink-form input {
+  width: 84px;
+  margin-top: 0;
+  padding: 6px 8px;
+}
+.shrink-form button { padding: 6px 10px; }
+.note {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 10px 0 0;
+}
+.note-cell {
+  color: var(--muted);
+  font-size: 12px;
+  max-width: 260px;
+}
 @media (max-width: 860px) {
   .layout { grid-template-columns: 1fr; }
   .nav { border-right: 0; border-bottom: 1px solid var(--line); display: flex; gap: 6px; overflow-x: auto; }

@@ -85,21 +85,34 @@ def list_judgments(
     status: str | None = None,
     scan_job_id: int | None = None,
 ) -> list[dict]:
+    """裁决清单：每单带出绑定版本（开单快照）与现行版本，供页面核对。"""
     clauses: list[str] = []
     params: list[object] = []
     if status:
-        clauses.append("status = ?")
+        clauses.append("j.status = ?")
         params.append(status)
     if scan_job_id is not None:
-        clauses.append("scan_job_id = ?")
+        clauses.append("j.scan_job_id = ?")
         params.append(scan_job_id)
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     rows = conn.execute(
-        "SELECT id, scan_job_id, partition_id, domain_code, biz_date, "
-        "policy_version, keep_days, decided_action, status, fail_reason, created_at "
-        "FROM judgments"
+        "SELECT j.id, j.scan_job_id, j.partition_id, j.domain_code, j.biz_date, "
+        "j.policy_version, j.keep_days, j.decided_action, j.status, "
+        "j.fail_reason, j.void_reason, j.created_at, "
+        "cur.version AS current_version, cur.keep_days AS current_keep_days "
+        "FROM judgments j "
+        "LEFT JOIN retain_policies cur "
+        "  ON cur.domain_code = j.domain_code AND cur.active = 1"
         + where
-        + " ORDER BY id DESC",
+        + " ORDER BY j.id DESC",
         params,
     ).fetchall()
-    return [dict(r) for r in rows]
+    items = []
+    for r in rows:
+        item = dict(r)
+        item["version_match"] = (
+            item["current_version"] is not None
+            and item["policy_version"] == item["current_version"]
+        )
+        items.append(item)
+    return items
